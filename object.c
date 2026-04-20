@@ -61,38 +61,46 @@ int object_exists(const ObjectID *id) {
 }
 
 // ─── TODO: Implement these ──────────────────────────────────────────────────
+char *object_write(const char *type, const void *data, size_t len) {
+    // 1. Prepare Header
+    char header[64];
+    int header_len = sprintf(header, "%s %zu", type, len) + 1; // +1 for the '\0'
 
-// Write an object to the store.
-//
-// Object format on disk:
-//   "<type> <size>\0<data>"
-//   where <type> is "blob", "tree", or "commit"
-//   and <size> is the decimal string of the data length
-//
-// Steps:
-//   1. Build the full object: header ("blob 16\0") + data
-//   2. Compute SHA-256 hash of the FULL object (header + data)
-//   3. Check if object already exists (deduplication) — if so, just return success
-//   4. Create shard directory (.pes/objects/XX/) if it doesn't exist
-//   5. Write to a temporary file in the same shard directory
-//   6. fsync() the temporary file to ensure data reaches disk
-//   7. rename() the temp file to the final path (atomic on POSIX)
-//   8. Open and fsync() the shard directory to persist the rename
-//   9. Store the computed hash in *id_out
+    // 2. Combine Header and Data
+    size_t total_len = header_len + len;
+    unsigned char *buffer = malloc(total_len);
+    if (!buffer) return NULL;
 
-// HINTS - Useful syscalls and functions for this phase:
-//   - sprintf / snprintf : formatting the header string
-//   - compute_hash       : hashing the combined header + data
-//   - object_exists      : checking for deduplication
-//   - mkdir              : creating the shard directory (use mode 0755)
-//   - open, write, close : creating and writing to the temp file
-//                          (Use O_CREAT | O_WRONLY | O_TRUNC, mode 0644)
-//   - fsync              : flushing the file descriptor to disk
-//   - rename             : atomically moving the temp file to the final path
-//
+    memcpy(buffer, header, header_len);
+    memcpy(buffer + header_len, data, len);
 
-//
-// Returns 0 on success, -1 on error.
+    // 3. Generate Hash (using the provided sha256_hex function)
+    char *hash = sha256_hex(buffer, total_len);
+    
+    // 4. Create Path: .pes/objects/xx/rest_of_hash
+    char dir_path[256], file_path[256];
+    char prefix[3];
+    strncpy(prefix, hash, 2);
+    prefix[2] = '\0';
+
+    sprintf(dir_path, ".pes/objects/%s", prefix);
+    sprintf(file_path, "%s/%s", dir_path, hash + 2);
+
+    // 5. Ensure directory exists
+    mkdir(".pes/objects", 0755);
+    mkdir(dir_path, 0755);
+
+    // 6. Write to File
+    FILE *f = fopen(file_path, "wb");
+    if (f) {
+        fwrite(buffer, 1, total_len, f);
+        fclose(f);
+    }
+
+    free(buffer);
+    return hash; // Caller is responsible for freeing this string
+}
+
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
     // TODO: Implement
     (void)type; (void)data; (void)len; (void)id_out;
@@ -100,27 +108,36 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 }
 
 // Read an object from the store.
-//
-// Steps:
-//   1. Build the file path from the hash using object_path()
-//   2. Open and read the entire file
-//   3. Parse the header to extract the type string and size
-//   4. Verify integrity: recompute the SHA-256 of the file contents
-//      and compare to the expected hash (from *id). Return -1 if mismatch.
-//   5. Set *type_out to the parsed ObjectType
-//   6. Allocate a buffer, copy the data portion (after the \0), set *data_out and *len_out
-//
-// HINTS - Useful syscalls and functions for this phase:
-//   - object_path        : getting the target file path
-//   - fopen, fread, fseek: reading the file into memory
-//   - memchr             : safely finding the '\0' separating header and data
-//   - strncmp            : parsing the type string ("blob", "tree", "commit")
-//   - compute_hash       : re-hashing the read data for integrity verification
-//   - memcmp             : comparing the computed hash against the requested hash
-//   - malloc, memcpy     : allocating and returning the extracted data
-//
-// The caller is responsible for calling free(*data_out).
-// Returns 0 on success, -1 on error (file not found, corrupt, etc.).
+void *object_read(const char *hash, char *type_out, size_t *len_out) {
+    char file_path[256];
+    sprintf(file_path, ".pes/objects/%.2s/%s", hash, hash + 2);
+
+    FILE *f = fopen(file_path, "rb");
+    if (!f) return NULL;
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *buffer = malloc(size);
+    fread(buffer, 1, size, f);
+    fclose(f);
+
+    // Parse header: "type size\0data"
+    char *header = (char *)buffer;
+    strcpy(type_out, header);
+    
+    size_t header_len = strlen(header) + 1;
+    *len_out = size - header_len;
+
+    // Move data to front and return
+    void *data = malloc(*len_out);
+    memcpy(data, buffer + header_len, *len_out);
+    free(buffer);
+    
+    return data;
+}
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     // TODO: Implement
     (void)id; (void)type_out; (void)data_out; (void)len_out;
